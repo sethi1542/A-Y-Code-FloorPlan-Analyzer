@@ -1,0 +1,49 @@
+The program I want to build is this. A website that will allow users to upload a pdf. Loading symbol while the program breaks up the pdf into 4 high resolution images for the ai to recognize. in the backend we will have examples of windows. the program will need to visually see and count how many windows there are on each floor and if they are closer than 24" to a door or 18"from the floor. Then the program will list the windows in an excel sheet for the user to view
+I forgot to mention that I need an option for the floor plans to be checked and counted also. So that the user can see the counts for the floor plans and the counts from the elevations. So they can see how accurate they are
+ To get our clients to pay for something like this we will need to break down the count for each individual window type. see attached of what they need to actually order the windows accurately. we will not worry about the stc yet but we can add that to the site that it will be coming soon. For now we can add the window tag and the amount of that window on each floor it does not matter so much which page has how many windows. How much longer do you think until we will get this up and running? 
+
+new work
+
+CLient: Can we have a windows only option. So that users can choose to count windows only 
+me:Can we have a windows only option. So that users can choose to count windows only
+client:That works! 
+me:So in that feature , We will not have to compare it with any of the doors? We will just tell the windows amount in each pdf page ? 
+client:Yes, that is correct. But we will still need a count of the ones that are tempered. So if a window is w01 then we need to add a tag that is w01t that is within 2ft of a door or 18" from the floor
+my conversation with the client for a new feature another one 
+
+
+i sended
+Just to clarify the output format for the new "Windows Only" mode, I’d like to confirm how you’d prefer the data to appear in the Excel report.
+
+Currently, we plan to:
+
+Count and list all window tags per page (e.g., W01, W02, etc.)
+
+For any windows that are within 2 feet of a door or less than 18 inches from the floor, we'll append a "t" to the tag — for example, W01t
+
+We'll exclude door counts entirely
+
+Could you kindly confirm the following:
+
+Window Summary Sheet:
+
+Would you like the report structured like this?
+
+Page #	W01	W01t	W02	W03t	Total
+Page 1	2	1	0	3	6
+Page 2	1	2	1	0	4
+Total	3	3	1	3	10
+
+Tempered Flags Sheet (Optional):
+
+Would you like a second sheet that lists each tempered window with context?
+
+Page	Tile	Window Tag	Reason
+1	5	W01	Near door
+1	12	W03	Less than 18" floor
+
+Let me know if you'd like to keep it simple with just the tag summary, or if the flag breakdown would be helpful for your internal review or ordering process.
+
+Happy to adjust the format to meet your workflow!
+client response below
+Option 1 works well. Instead of page 1 could we have the page # that is on the bottom right of the page

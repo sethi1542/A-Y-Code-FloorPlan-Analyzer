@@ -1,0 +1,365 @@
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment
+from io import BytesIO
+from collections import Counter, defaultdict
+
+def create_excel_report(data, drawing_type, window_tag_counts, flag_details):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = f"{drawing_type.capitalize()} Summary"
+
+    tags_sorted = sorted(window_tag_counts.keys())
+    header = ["Page #"] + tags_sorted + ["Total Windows", "Total Doors"]
+    ws.append(header)
+
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal='center')
+
+    for entry in data:
+        row = [f"Page {entry['image_index'] + 1}"]
+        page_total_windows = 0
+        for tag in tags_sorted:
+            count = entry.get("window_types", {}).get(tag, 0)
+            row.append(count)
+            page_total_windows += count
+        row.append(page_total_windows)
+        row.append(entry.get("doors", 0))
+        ws.append(row)
+
+    total_row = ["TOTAL"]
+    for tag in tags_sorted:
+        total_row.append(window_tag_counts[tag])
+    total_row.append(sum(d["windows"] for d in data))
+    total_row.append(sum(d["doors"] for d in data))
+    ws.append(total_row)
+
+    for row in ws.iter_rows():
+        for cell in row:
+            cell.alignment = Alignment(horizontal='center')
+
+    flag_ws = wb.create_sheet("Issues & Flags")
+    flag_ws.append(["Page", "Tile", "Flag Description"])
+
+    for flag in flag_details:
+        flag_ws.append([flag["Page"], flag["Tile"], flag["Flag"]])
+
+    for row in flag_ws.iter_rows():
+        for cell in row:
+            cell.alignment = Alignment(horizontal='left')
+
+    buffer = BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    return buffer
+import fitz  # PyMuPDF
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.parsers import MultiPartParser
+from django.http import FileResponse
+from PIL import Image
+import io
+import tempfile
+import os
+from collections import Counter
+from .excel_report import create_excel_report
+from .gpt_vision import analyze_image
+
+Image.MAX_IMAGE_PIXELS = None
+
+def is_mostly_white(tile, threshold=0.95):
+    grayscale = tile.convert("L")
+    white_pixels = sum(1 for p in grayscale.getdata() if p > 240)
+    total_pixels = tile.width * tile.height
+    return white_pixels / total_pixels > threshold
+
+class UploadPDFView(APIView):
+    parser_classes = [MultiPartParser]
+
+    def post(self, request):
+        pdf_file = request.FILES.get("file")
+        drawing_type = request.POST.get("type", "elevation")
+        mode = request.POST.get("mode", "accurate").lower()
+
+        if not pdf_file:
+            return Response({"error": "No file provided"}, status=400)
+
+        # Set tiling mode: 4×4 for "fast", 6×6 for "accurate"
+        tiles_per_side = 6 if mode == "accurate" else 4
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(pdf_file.read())
+            tmp_path = tmp.name
+
+        try:
+            page_tiles_list = self.pdf_to_image_tiles(tmp_path, tiles_per_side=tiles_per_side)
+            analysis_data = []
+            all_window_types = Counter()
+            all_flags_detailed = []
+
+            for page_index, tiles in enumerate(page_tiles_list):
+                page_windows = 0
+                page_doors = 0
+                page_flags = []
+                page_window_types = Counter()
+
+                for tile_index, tile in enumerate(tiles):
+                    if is_mostly_white(tile):
+                        continue  # Skip blank/white tiles
+
+                    result = analyze_image(tile, drawing_type)
+
+                    # Count doors and flags
+                    page_doors += result.get("door_count", 0)
+                    page_flags.extend(result.get("flags", []))
+
+                    # Record flags with context
+                    for flag in result.get("flags", []):
+                        all_flags_detailed.append({
+                            "Page": page_index + 1,
+                            "Tile": tile_index + 1,
+                            "Flag": flag
+                        })
+
+                    # Count windows by tag
+                    tile_window_types = result.get("window_types", {})
+                    page_windows += sum(tile_window_types.values())
+                    page_window_types.update(tile_window_types)
+                    all_window_types.update(tile_window_types)
+
+                # One page's data
+                analysis_data.append({
+                    "image_index": page_index,
+                    "windows": page_windows,
+                    "doors": page_doors,
+                    "flags": page_flags,
+                    "window_types": dict(page_window_types)
+                })
+
+            # Generate Excel
+            excel_buffer = create_excel_report(
+                data=analysis_data,
+                drawing_type=drawing_type,
+                window_tag_counts=all_window_types,
+                flag_details=all_flags_detailed
+            )
+
+            return FileResponse(
+                excel_buffer,
+                as_attachment=True,
+                filename=f"{drawing_type}_results_{mode}.xlsx"
+            )
+
+        except Exception as e:
+            print("Server error:", str(e))
+            return Response({"error": "Processing failed."}, status=500)
+
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def pdf_to_image_tiles(self, path, tiles_per_side=6):
+        doc = fitz.open(path)
+        all_tiles = []
+
+        for i in range(min(len(doc), 12)):  # Limit to 12 pages max
+            page = doc.load_page(i)
+            pix = page.get_pixmap(dpi=300)
+            img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+
+            width, height = img.size
+            tile_w = width // tiles_per_side
+            tile_h = height // tiles_per_side
+
+            tiles = []
+            for row in range(tiles_per_side):
+                for col in range(tiles_per_side):
+                    left = col * tile_w
+                    upper = row * tile_h
+                    right = left + tile_w
+                    lower = upper + tile_h
+                    tile = img.crop((left, upper, right, lower))
+                    tiles.append(tile)
+
+            all_tiles.append(tiles)
+
+        return all_tiles
+import openai
+import base64
+from io import BytesIO
+from dotenv import load_dotenv
+import os
+import json
+from PIL import Image
+
+Image.MAX_IMAGE_PIXELS = None
+load_dotenv()
+openai.api_key = os.getenv("OPENAI_API_KEY")
+
+def image_to_base64(pil_image):
+    buffered = BytesIO()
+    pil_image.save(buffered, format="PNG")
+    return base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+def analyze_image(pil_image, drawing_type):
+    base64_img = image_to_base64(pil_image)
+
+    prompt = f"""
+You are an architectural assistant analyzing a {drawing_type} drawing tile.
+Your task is to detect the following:
+- A dictionary of window tags and their counts (e.g., "E01": 3, "E08": 5)
+- The total number of doors
+- Flags for:
+   - Any window too close to a door (within 24 inches)
+   - Any window less than 18 inches from the floor (only if elevation)
+
+🔴 Return ONLY valid JSON. NO explanation, NO markdown, NO preamble. NO formatting.
+
+Your response MUST look like this:
+
+{{
+  "window_types": {{"E01": 3, "E08": 5}},
+  "door_count": 2,
+  "flags": ["Window too close to door", "Window less than 18in from floor"]
+}}
+"""
+
+    try:
+        response = openai.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a strict JSON generator. Only respond with valid JSON. No explanation. No formatting. No markdown."
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt.strip()},
+                        {"type": "image_url", "image_url": {
+                            "url": f"data:image/png;base64,{base64_img}"
+                        }}
+                    ]
+                }
+            ],
+            max_tokens=500,
+            temperature=0
+        )
+
+        text = response.choices[0].message.content.strip()
+        print("GPT Raw Response:", text)
+
+        if text.lower().startswith("json"):
+            text = text[text.lower().index("{"):]
+
+        json_start = text.find('{')
+        json_end = text.rfind('}') + 1
+
+        if json_start == -1 or json_end == -1:
+            raise ValueError("No valid JSON found in GPT response")
+
+        json_str = text[json_start:json_end]
+        result = json.loads(json_str)
+
+        return {
+            "window_types": result.get("window_types", {}),
+            "door_count": int(result.get("door_count", 0)),
+            "flags": result.get("flags", [])
+        }
+
+    except Exception as e:
+        print("GPT Vision error:", str(e))
+        return {
+            "window_types": {},
+            "door_count": 0,
+            "flags": ["AI detection failed or malformed response"]
+        }
+import React, { useState } from "react";
+import axios from "axios";
+import { Upload, FileUpIcon } from "lucide-react";
+
+export default function UploadForm({ setLoading, setResults }) {
+  const [file, setFile] = useState(null);
+  const [drawingType, setDrawingType] = useState("elevation");
+  const [mode, setMode] = useState("accurate"); // default to 6x6
+
+  const handleUpload = async () => {
+    if (!file) return alert("Please select a PDF file.");
+
+    setLoading(true);
+
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("type", drawingType);
+    formData.append("mode", mode); // NEW
+
+    try {
+      const response = await axios.post("/api/upload/", formData, {
+        responseType: "blob",
+      });
+
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      setResults((prev) => ({
+        ...prev,
+        [drawingType]: { url, type: drawingType },
+      }));
+    } catch (err) {
+      alert("Upload failed.");
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="bg-white shadow-md rounded-xl p-6 space-y-5 border max-w-xl mx-auto mt-8">
+      <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
+        <Upload className="w-6 h-6 text-blue-600" />
+        Upload Drawing
+      </h2>
+
+      <div className="space-y-3">
+        <label className="block">
+          <span className="text-gray-700">Choose PDF File</span>
+          <input
+            type="file"
+            accept="application/pdf"
+            onChange={(e) => setFile(e.target.files[0])}
+            className="mt-1 block w-full border rounded-lg p-2 text-sm shadow-sm file:mr-4 file:py-1 file:px-3 file:border-0 file:text-sm file:bg-blue-100 file:text-blue-700"
+          />
+        </label>
+
+        <label className="block">
+          <span className="text-gray-700">Drawing Type</span>
+          <select
+            value={drawingType}
+            onChange={(e) => setDrawingType(e.target.value)}
+            className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:ring-blue-500 focus:border-blue-500"
+          >
+            <option value="elevation">Elevation</option>
+            <option value="floorplan">Floor Plan</option>
+          </select>
+        </label>
+
+        <label className="block">
+          <span className="text-gray-700">Accuracy Mode</span>
+          <select
+            value={mode}
+            onChange={(e) => setMode(e.target.value)}
+            className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:ring-blue-500 focus:border-blue-500"
+          >
+            <option value="fast">Fast (4×4 tiles)</option>
+            <option value="accurate">Accurate (6×6 tiles)</option>
+          </select>
+        </label>
+      </div>
+
+      <button
+        onClick={handleUpload}
+        className="w-full bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700 transition font-semibold"
+      >
+        Analyze PDF
+      </button>
+    </div>
+  );
+}
